@@ -132,6 +132,41 @@ agent-tools agents
 
 ---
 
+### `test`
+
+端到端测试 hook 采集管道，验证 hooks 是否正常注入和触发。
+
+```bash
+agent-tools test [--agent <name>] [--keep] [--timeout <seconds>]
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--agent <name>` | 只测试指定 Agent（如 `claude-code`、`codebuddy`） | 测试所有已安装的 Agent |
+| `--keep` | 测试完成后保留临时目录（便于调试） | `false` |
+| `--timeout <seconds>` | 每个测试场景的超时时间（秒） | `60` |
+
+示例：
+
+```bash
+agent-tools test                          # 测试所有已安装 Agent
+agent-tools test --agent claude-code      # 仅测试 Claude Code
+agent-tools test --agent codebuddy --keep # 测试 CodeBuddy，保留临时文件
+```
+
+测试流程：
+1. 在系统临时目录创建隔离环境（独立 SQLite 测试库 + 工作目录）
+2. 临时向 Agent 的用户级配置注入指向测试库的同步 hooks
+3. 调用 Agent CLI（`-p` 模式）执行预定义场景（工具调用、Skill 调用）
+4. 检查测试库中是否采集到预期的事件类型和字段
+5. 恢复原始配置，清理临时文件
+
+每个 Agent 测试 2 个场景、9 项检查：
+- **场景 1**（基础工具调用）：验证 session_start、user_message、tool_pre、tool_use（含 tool_name）、session_id、session_end/stop
+- **场景 2**（Skill 调用）：验证 skill_use 事件和 skill_name 字段
+
+---
+
 ## How It Works
 
 ### Hook 注入机制
