@@ -8,10 +8,14 @@ function createNormalizedEvent(agentData) {
     hostname: os.hostname(),
     platform: os.platform(),
     event_time: new Date().toISOString(),
-    token_input: 0, token_output: 0,
-    token_cache_read: 0, token_cache_write: 0,
-    files_created: 0, files_modified: 0,
-    lines_added: 0, lines_removed: 0,
+    // Defaults are null (not 0) to distinguish "not available" from "genuinely zero".
+    // Adapters set actual values only when the data source provides them:
+    //   - token_*: populated on Stop/SessionEnd events via transcript JSONL
+    //   - files_*/lines_*: populated on PostToolUse events for Write/Edit tools
+    token_input: null, token_output: null,
+    token_cache_read: null, token_cache_write: null,
+    files_created: null, files_modified: null,
+    lines_added: null, lines_removed: null,
     ...agentData,
   };
 }

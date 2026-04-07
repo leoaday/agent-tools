@@ -1,20 +1,40 @@
+const fs = require('fs');
+
 function normalize(eventType, rawData) {
   const base = {
     agent: 'codebuddy',
     session_id: rawData.session_id || rawData.sessionId || 'unknown',
     event_type: mapEventType(eventType),
   };
-  if (rawData.tool_name) base.tool_name = rawData.tool_name;
-  if (rawData.tool) base.tool_name = rawData.tool;
-  if (rawData.model) base.model = rawData.model;
-  if (rawData.usage) {
-    base.token_input = rawData.usage.input_tokens || 0;
-    base.token_output = rawData.usage.output_tokens || 0;
-  }
-  if (rawData.skill_name) base.skill_name = rawData.skill_name;
 
-  // Detect user-typed slash commands via UserPromptSubmit hook.
-  // CodeBuddy (fork of Claude Code) passes the raw prompt before skill expansion.
+  // tool_name is directly in the hook payload for PreToolUse/PostToolUse
+  if (rawData.tool_name) base.tool_name = rawData.tool_name;
+
+  // model is only available in SessionStart hook payload
+  if (rawData.model) base.model = rawData.model;
+
+  // ── File change extraction (PostToolUse) ────────────────────────────────
+  // CodeBuddy (Claude Code fork) hook payloads do NOT include file metrics.
+  // Infer from tool_input for Write/Edit tools.
+  if (eventType === 'PostToolUse') {
+    const input = rawData.tool_input || {};
+    extractFileChanges(base, rawData.tool_name, input);
+  }
+
+  // ── Token extraction (Stop / SessionEnd) ────────────────────────────────
+  // Read transcript JSONL to sum usage data (same approach as Claude Code).
+  if ((eventType === 'Stop' || eventType === 'SessionEnd') && rawData.transcript_path) {
+    try {
+      const totals = readTranscriptUsage(rawData.transcript_path);
+      if (totals.input_tokens)  base.token_input = totals.input_tokens;
+      if (totals.output_tokens) base.token_output = totals.output_tokens;
+      if (totals.model)         base.model = totals.model;
+    } catch {
+      // transcript read failure is non-fatal
+    }
+  }
+
+  // ── Skill detection ─────────────────────────────────────────────────────
   if (eventType === 'UserPromptSubmit' && typeof rawData.prompt === 'string') {
     const trimmed = rawData.prompt.trim();
     if (trimmed.startsWith('/')) {
@@ -26,7 +46,6 @@ function normalize(eventType, rawData) {
     }
   }
 
-  // Detect model-initiated Skill tool invocations (PostToolUse with tool_name="Skill").
   if (eventType === 'PostToolUse' && base.tool_name === 'Skill') {
     const skillInput = rawData.tool_input || rawData.input || {};
     if (typeof skillInput.skill === 'string' && skillInput.skill) {
@@ -37,6 +56,53 @@ function normalize(eventType, rawData) {
 
   return base;
 }
+
+// ── File change helpers ───────────────────────────────────────────────────
+
+function countLines(str) {
+  if (!str) return 0;
+  return str.split('\n').length;
+}
+
+function extractFileChanges(base, toolName, input) {
+  if (toolName === 'Write') {
+    base.files_created = 1;
+    base.lines_added = countLines(input.content);
+  } else if (toolName === 'Edit') {
+    base.files_modified = 1;
+    const oldLines = countLines(input.old_string);
+    const newLines = countLines(input.new_string);
+    base.lines_added = Math.max(0, newLines - oldLines);
+    base.lines_removed = Math.max(0, oldLines - newLines);
+  }
+}
+
+// ── Transcript token extraction ───────────────────────────────────────────
+
+function readTranscriptUsage(transcriptPath) {
+  const totals = { input_tokens: 0, output_tokens: 0, model: null };
+  if (!fs.existsSync(transcriptPath)) return totals;
+
+  const content = fs.readFileSync(transcriptPath, 'utf-8');
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      const usage = entry?.message?.usage;
+      if (usage) {
+        totals.input_tokens  += usage.input_tokens || 0;
+        totals.output_tokens += usage.output_tokens || 0;
+      }
+      const model = entry?.message?.model;
+      if (model) totals.model = model;
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return totals;
+}
+
+// ── Event type mapping ────────────────────────────────────────────────────
 
 function mapEventType(event) {
   const map = {

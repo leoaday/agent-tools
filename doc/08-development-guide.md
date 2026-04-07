@@ -505,7 +505,60 @@ Claude Code 在 `-p`（非交互式）模式下通过 `spawnSync` 调用时，ho
 - **`.claude/settings.json`（project-level）不在 `-p` 模式下生效**：项目级设置因工作区信任机制，在非交互模式下可能被忽略。
 - **结论**：hooks 必须注入到用户级设置 `~/.claude/settings.json`，test 命令通过临时注入并在 finally 块恢复来实现隔离。
 
-### 9. 上报时机的并发问题
+### 9. CodeBuddy 短任务中 SessionStart/UserPromptSubmit 可能缺失
+
+CodeBuddy 在 `-p` 模式下存在竞态条件：当任务非常短（< 10s）时，`SessionStart` 或 `UserPromptSubmit` hook 可能还未完成写入，工具调用就已经开始了。具体表现：
+
+- **短任务**（如 "write hello to file"，~7s）：`session_start` 和 `user_message` 可能随机缺失一个
+- **长任务**（如 Skill 调用，~40s+）：所有事件正常采集
+
+这是 CodeBuddy 的行为特性（启动阶段的 hook 执行与主流程存在竞争），不是 agent-tools 的 bug。`agent-tools test` 已将 CodeBuddy 场景 1 中的 `session_start` 和 `user_message` 检查标记为 `optional`（不影响整体测试结果）。
+
+> Claude Code 不存在此问题——`SessionStart` 和 `UserPromptSubmit` hook 始终在工具调用之前可靠触发。
+
+### 10. Hook Payload 不含 Token 和文件变更数据
+
+**重要：Claude Code / CodeBuddy 的 hook stdin payload 不包含 `usage`（token）和文件变更字段。**
+
+所有 hook 的 base payload schema（Zod `Iw()`）：
+```
+session_id, transcript_path, cwd, permission_mode?, agent_id?, agent_type?
+```
+
+各事件的特有字段：
+| Event | 特有字段 |
+|-------|---------|
+| PostToolUse | `tool_name`, `tool_input`, `tool_response`, `tool_use_id` |
+| PreToolUse | `tool_name`, `tool_input`, `tool_use_id` |
+| UserPromptSubmit | `prompt` |
+| SessionStart | `source`, `agent_type?`, `model?` |
+| Stop | `stop_hook_active`, `last_assistant_message?` |
+| SessionEnd | `reason` |
+
+**不包含的字段**：`usage`/`input_tokens`/`output_tokens`、`files_created`、`files_modified`、`lines_added`、`lines_removed`。
+
+#### 数据获取方式
+
+adapter 通过以下替代方式提取这些数据：
+
+1. **文件变更**：从 PostToolUse 的 `tool_input` 推算
+   - Write 工具：`tool_input.content` → `files_created=1`，`lines_added` = 内容行数
+   - Edit 工具：`tool_input.old_string` / `new_string` → `files_modified=1`，行数差值
+
+2. **Token 用量**：从 `transcript_path` 指向的 JSONL 文件中累计
+   - 每个 assistant 条目含 `.message.usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}`
+   - 在 Stop 或 SessionEnd hook 中读取并累加
+   - 同时从 `.message.model` 获取模型名称
+
+3. **Model**：SessionStart payload 包含 `model` 字段；Stop/SessionEnd 从 transcript 获取
+
+#### 注意事项
+
+- `event-normalizer.js` 中这些字段默认值为 `null`（非 0），以区分"不可用"和"确实为零"
+- transcript 读取是同步操作，在 hook 进程中执行，但 transcript 文件是本地的且大小可控
+- 只有 Write/Edit 工具会产生文件变更数据，Bash/Read 等工具的 PostToolUse 事件中这些字段为 null
+
+### 11. 上报时机的并发问题
 
 `uploader.js` 的自动上报（`startAutoUpload()`）和手动 `agent-tools sync` 可能同时运行。建议使用文件锁或 `uploading` 状态标志防止并发上报同一批事件：
 

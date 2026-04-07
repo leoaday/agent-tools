@@ -1,28 +1,45 @@
+const fs = require('fs');
+
 function normalize(eventType, rawData) {
   const base = {
     agent: 'claude-code',
     session_id: rawData.session_id || rawData.sessionId || 'unknown',
     event_type: mapEventType(eventType),
   };
-  if (rawData.tool_name) base.tool_name = rawData.tool_name;
-  if (rawData.tool) base.tool_name = rawData.tool;
-  if (rawData.model) base.model = rawData.model;
-  if (rawData.usage) {
-    base.token_input = rawData.usage.input_tokens || 0;
-    base.token_output = rawData.usage.output_tokens || 0;
-    base.token_cache_read = rawData.usage.cache_read_input_tokens || 0;
-    base.token_cache_write = rawData.usage.cache_creation_input_tokens || 0;
-  }
-  if (rawData.skill_name) base.skill_name = rawData.skill_name;
-  if (rawData.files_created !== undefined) base.files_created = rawData.files_created;
-  if (rawData.files_modified !== undefined) base.files_modified = rawData.files_modified;
-  if (rawData.lines_added !== undefined) base.lines_added = rawData.lines_added;
-  if (rawData.lines_removed !== undefined) base.lines_removed = rawData.lines_removed;
-  if (rawData.conversation_turn !== undefined) base.conversation_turn = rawData.conversation_turn;
 
-  // Detect user-typed slash commands (e.g. /commit, /review-pr) via UserPromptSubmit hook.
-  // Claude Code passes the raw prompt text before skill expansion, so `/skill-name` is visible here.
-  // The model-initiated Skill tool (tool_name="Skill") is a separate code path handled above.
+  // tool_name is directly in the hook payload for PreToolUse/PostToolUse
+  if (rawData.tool_name) base.tool_name = rawData.tool_name;
+
+  // model is only available in SessionStart hook payload
+  if (rawData.model) base.model = rawData.model;
+
+  // ── File change extraction (PostToolUse) ────────────────────────────────
+  // Claude Code hook payloads do NOT include file change metrics directly.
+  // We infer them from tool_input for Write/Edit tools.
+  if (eventType === 'PostToolUse') {
+    const input = rawData.tool_input || {};
+    extractFileChanges(base, rawData.tool_name, input);
+  }
+
+  // ── Token extraction (Stop / SessionEnd) ────────────────────────────────
+  // Claude Code hook payloads do NOT include usage/token data.
+  // We read the transcript JSONL (path provided in every hook payload) and
+  // sum up all usage entries from assistant messages.
+  if ((eventType === 'Stop' || eventType === 'SessionEnd') && rawData.transcript_path) {
+    try {
+      const totals = readTranscriptUsage(rawData.transcript_path);
+      if (totals.input_tokens)  base.token_input = totals.input_tokens;
+      if (totals.output_tokens) base.token_output = totals.output_tokens;
+      if (totals.cache_read)    base.token_cache_read = totals.cache_read;
+      if (totals.cache_write)   base.token_cache_write = totals.cache_write;
+      if (totals.model)         base.model = totals.model;
+    } catch {
+      // transcript read failure is non-fatal — hook must never crash
+    }
+  }
+
+  // ── Skill detection ─────────────────────────────────────────────────────
+  // Inline path: UserPromptSubmit with prompt starting with "/"
   if (eventType === 'UserPromptSubmit' && typeof rawData.prompt === 'string') {
     const trimmed = rawData.prompt.trim();
     if (trimmed.startsWith('/')) {
@@ -34,8 +51,7 @@ function normalize(eventType, rawData) {
     }
   }
 
-  // Detect model-initiated Skill tool invocations (PostToolUse with tool_name="Skill").
-  // The skill name is carried in the tool input under the "skill" key.
+  // Fork path: PostToolUse with tool_name="Skill"
   if (eventType === 'PostToolUse' && base.tool_name === 'Skill') {
     const skillInput = rawData.tool_input || rawData.input || {};
     if (typeof skillInput.skill === 'string' && skillInput.skill) {
@@ -46,6 +62,63 @@ function normalize(eventType, rawData) {
 
   return base;
 }
+
+// ── File change helpers ───────────────────────────────────────────────────
+
+function countLines(str) {
+  if (!str) return 0;
+  return str.split('\n').length;
+}
+
+function extractFileChanges(base, toolName, input) {
+  if (toolName === 'Write') {
+    base.files_created = 1;
+    base.lines_added = countLines(input.content);
+  } else if (toolName === 'Edit') {
+    base.files_modified = 1;
+    const oldLines = countLines(input.old_string);
+    const newLines = countLines(input.new_string);
+    base.lines_added = Math.max(0, newLines - oldLines);
+    base.lines_removed = Math.max(0, oldLines - newLines);
+  }
+}
+
+// ── Transcript token extraction ───────────────────────────────────────────
+
+/**
+ * Read a Claude Code transcript JSONL and sum all usage data.
+ * Each assistant message contains `.message.usage` with token counts.
+ * Also captures the model from the last assistant message.
+ *
+ * This is synchronous — transcript files are local and small enough.
+ * Called from Stop/SessionEnd hooks which run at session end.
+ */
+function readTranscriptUsage(transcriptPath) {
+  const totals = { input_tokens: 0, output_tokens: 0, cache_read: 0, cache_write: 0, model: null };
+  if (!fs.existsSync(transcriptPath)) return totals;
+
+  const content = fs.readFileSync(transcriptPath, 'utf-8');
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      const usage = entry?.message?.usage;
+      if (usage) {
+        totals.input_tokens  += usage.input_tokens || 0;
+        totals.output_tokens += usage.output_tokens || 0;
+        totals.cache_read    += usage.cache_read_input_tokens || 0;
+        totals.cache_write   += usage.cache_creation_input_tokens || 0;
+      }
+      const model = entry?.message?.model;
+      if (model) totals.model = model;
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return totals;
+}
+
+// ── Event type mapping ────────────────────────────────────────────────────
 
 function mapEventType(event) {
   const map = {
