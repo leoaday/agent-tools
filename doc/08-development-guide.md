@@ -72,7 +72,7 @@
 | `cli/bin/cli.js` | CLI 入口，注册所有命令（Commander.js）：init / setup / sync / stats / status / agents |
 | `cli/src/hooks/universal-hook.js` | Hook 脚本入口：从 stdin 读取 JSON → 选择适配器 → 调用 `local-store` 存储。**此文件必须永不 crash** |
 | `cli/src/hooks/adapters/claude-code.js` | Claude Code 适配器：normalize 原始 hook 数据，含斜线命令和 Skill 工具检测 |
-| `cli/src/hooks/adapters/codebuddy.js` | CodeBuddy 适配器：normalize PreToolUse / PostToolUse 数据 |
+| `cli/src/hooks/adapters/codebuddy.js` | CodeBuddy 适配器：normalize 全部 hook 事件，含 Skill 调用检测（与 claude-code 适配器对齐） |
 | `cli/src/detector/index.js` | 检测器注册表：`detectAll()` / `setupAll()` |
 | `cli/src/detector/claude-code.js` | Claude Code 检测器：`isInstalled()`、`configExists()`、`hasAgentToolsHooks()`、`injectHooks()` |
 | `cli/src/detector/codebuddy.js` | CodeBuddy 检测器：同上，注入 `~/.codebuddy/settings.json` |
@@ -478,7 +478,17 @@ echo '{"matcher":"","hooks":[{"type":"command","command":"touch /tmp/hook_test"}
 agent-tools setup --force
 ```
 
-`cli/src/detector/claude-code.js` 的 `injectHooks()` 已处理旧格式迁移（自动将老条目包裹为新格式）。
+`cli/src/detector/claude-code.js` 和 `cli/src/detector/codebuddy.js` 的 `injectHooks()` 已处理旧格式迁移（自动将老条目包裹为新格式）。
+
+#### 版本自动检测
+
+`injectHooks()` 现在会自动检测已安装的 Agent 版本（`claude --version` / `codebuddy --version`），根据版本号选择格式：
+
+- **≥ 2.1.0**：使用新嵌套格式（`{ matcher, hooks: [...] }`）
+- **< 2.1.0**：使用旧扁平格式（`{ type, command }`）
+- **无法检测版本**：默认使用新格式（因为旧格式在新版上的后果是灾难性的静默失效）
+
+相关函数：`getVersion()`、`needsNestedFormat()`，在两个 detector 中均有导出。`agent-tools test` 的 `injectTestHooks()` 也通过 `detector.needsNestedFormat()` 进行版本感知注入。
 
 ### 8. Claude Code hooks 在 `-p` 模式子进程中的触发条件
 
@@ -614,7 +624,10 @@ agent-tools test --agent claude-code --timeout 90
 
 | 场景 | Agent 指令 | 验证事件 |
 |------|-----------|---------|
-| 基础工具调用 | `Write "hello" to greet.txt` | `tool_pre`、`tool_use`（含 `tool_name`） |
+| 基础工具调用与生命周期 | `Write "hello" to greet.txt` | `session_start`、`user_message`、`tool_pre`、`tool_use`（含 `tool_name`、`session_id`）、`assistant_stop` |
+| Skill 调用 | `/agent-tools-test-verify` | `skill_use`，`skill_name=agent-tools-test-verify` |
+
+> **发现与修复**：CodeBuddy 2.x 是 Claude Code 的 fork，实际支持全部 7 种 hook 事件（SessionStart/End、PreToolUse/PostToolUse、UserPromptSubmit、Stop、Notification），而非最初假设的仅 PreToolUse/PostToolUse。之前的 `codebuddy.js` adapter 也仅映射了 2 种事件类型，现已补全全部映射和 Skill 检测逻辑（与 `claude-code.js` adapter 对齐）。Skill 文件放置在 `~/.codebuddy/commands/` 目录。
 
 #### 关键实现文件
 

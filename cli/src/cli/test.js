@@ -35,18 +35,22 @@ const HOOK_SCRIPT = path.resolve(__dirname, '../hooks/universal-hook.js');
 // Agent definitions
 // ─────────────────────────────────────────────────────────────────────────────
 
+const claudeCodeDetector = require('../detector/claude-code');
+const codebuddyDetector  = require('../detector/codebuddy');
+
 const AGENT_DEFS = {
   'claude-code': {
     displayName  : 'Claude Code',
     bin          : 'claude',
     hookEvents   : ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop'],
     userSettings : path.join(os.homedir(), '.claude', 'settings.json'),
+    detector     : claudeCodeDetector,
     // Skills must be placed in the user-level commands dir (~/.claude/commands/) because:
     //   • --plugin-dir does not load markdown skills in -p mode
     //   • Project-level .claude/skills/ is ignored in -p mode without workspace trust
     //   • ~/.claude/skills/ is not the actual commands path (despite debug log saying so)
     userSkillsDir: path.join(os.homedir(), '.claude', 'commands'),
-    buildArgv(workDir, prompt) {
+    buildArgv(_workDir, prompt) {
       return ['--dangerously-skip-permissions', '-p', prompt];
     },
     scenarios: [
@@ -112,17 +116,27 @@ const AGENT_DEFS = {
   'codebuddy': {
     displayName  : 'CodeBuddy',
     bin          : 'codebuddy',
-    hookEvents   : ['PreToolUse', 'PostToolUse'],
+    hookEvents   : ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop'],
     userSettings : path.join(os.homedir(), '.codebuddy', 'settings.json'),
-    buildArgv(workDir, prompt) {
+    detector     : codebuddyDetector,
+    userSkillsDir: path.join(os.homedir(), '.codebuddy', 'commands'),
+    buildArgv(_workDir, prompt) {
       return ['--dangerously-skip-permissions', '-p', prompt];
     },
     scenarios: [
       {
-        name      : 'Basic tool use',
-        prompt    : 'Write the text "hello agent-tools test" to a file named greet.txt',
-        usePlugin : false,
+        name     : 'Basic tool use & session lifecycle',
+        prompt   : 'Write the text "hello agent-tools test" to a file named greet.txt',
+        useSkill : false,
         checks: [
+          {
+            label : 'session_start event captured',
+            fn    : evts => evts.some(e => e.event_type === 'session_start'),
+          },
+          {
+            label : 'user_message event captured (UserPromptSubmit)',
+            fn    : evts => evts.some(e => e.event_type === 'user_message'),
+          },
           {
             label : 'tool_pre event captured (PreToolUse)',
             fn    : evts => evts.some(e => e.event_type === 'tool_pre'),
@@ -134,6 +148,35 @@ const AGENT_DEFS = {
           {
             label : 'tool_name field populated on tool_use',
             fn    : evts => evts.some(e => e.event_type === 'tool_use' && e.tool_name),
+          },
+          {
+            label : 'session_id populated on all events',
+            fn    : evts => evts.length > 0 && evts.every(e => e.session_id && e.session_id !== 'unknown'),
+          },
+          {
+            label : 'session end or stop event captured',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'assistant_stop' ||
+                              e.event_type === 'session_end'),
+          },
+        ],
+      },
+      {
+        name     : 'Skill invocation via /skill-name',
+        prompt   : '/agent-tools-test-verify',
+        useSkill : true,
+        skillName: 'agent-tools-test-verify',
+        skillBody: 'List the files in the current directory using the Bash tool.\n',
+        checks: [
+          {
+            label : 'skill_use event captured',
+            fn    : evts => evts.some(e => e.event_type === 'skill_use'),
+          },
+          {
+            label : 'skill_name = "agent-tools-test-verify"',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'skill_use' &&
+                              e.skill_name === 'agent-tools-test-verify'),
           },
         ],
       },
@@ -216,7 +259,7 @@ function printCheck(label, passed) {
  */
 const TEST_MARKER = '__agent_tools_test__';
 
-function injectTestHooks(settingsPath, agentKey, hookEvents, testDbPath) {
+function injectTestHooks(settingsPath, agentKey, hookEvents, testDbPath, detector) {
   let settings = {};
   let originalContent = null;
   if (fs.existsSync(settingsPath)) {
@@ -224,33 +267,32 @@ function injectTestHooks(settingsPath, agentKey, hookEvents, testDbPath) {
     try { settings = JSON.parse(originalContent); } catch { settings = {}; }
   }
 
+  const nested = detector?.needsNestedFormat?.() ?? true;
+
   if (!settings.hooks) settings.hooks = {};
 
   for (const event of hookEvents) {
-    // Claude Code ≥ 2.1.x requires new nested format: {matcher, hooks:[{type,command}]}
-    // Old flat format silently fails schema validation and the entire userSettings file
-    // is dropped, so hooks never fire.
-    const testEntry = {
-      [TEST_MARKER]: true,
-      matcher: '',
-      hooks: [{
-        type   : 'command',
-        // Synchronous hook — agent waits, guaranteeing DB write before process exits
-        command: `node "${HOOK_SCRIPT}" --agent=${agentKey} --event=${event} --db="${testDbPath}"`,
-      }],
-    };
+    const command = `node "${HOOK_SCRIPT}" --agent=${agentKey} --event=${event} --db="${testDbPath}"`;
+    // Synchronous hook (no async:true) — agent waits, guaranteeing DB write before process exits.
+    // Format chosen based on detected agent version (see detector.needsNestedFormat).
+    const testEntry = nested
+      ? { [TEST_MARKER]: true, matcher: '', hooks: [{ type: 'command', command }] }
+      : { [TEST_MARKER]: true, type: 'command', command };
+
     if (!Array.isArray(settings.hooks[event])) {
       settings.hooks[event] = [testEntry];
     } else {
-      // Migrate any old-format entries inline (needed if production hooks are still old format)
-      settings.hooks[event] = settings.hooks[event].map((h) => {
-        if (h.command && !h.hooks) {
-          const inner = { type: 'command', command: h.command };
-          if (h.async !== undefined) inner.async = h.async;
-          return { matcher: h.matcher ?? '', hooks: [inner] };
-        }
-        return h;
-      });
+      // If nested format, migrate any old-format entries inline
+      if (nested) {
+        settings.hooks[event] = settings.hooks[event].map((h) => {
+          if (h.command && !h.hooks) {
+            const inner = { type: 'command', command: h.command };
+            if (h.async !== undefined) inner.async = h.async;
+            return { matcher: h.matcher ?? '', hooks: [inner] };
+          }
+          return h;
+        });
+      }
       // Remove any stale test entries, then append ours
       settings.hooks[event] = settings.hooks[event].filter(h => !h[TEST_MARKER]);
       settings.hooks[event].push(testEntry);
@@ -314,7 +356,7 @@ async function runTest(options) {
     // ── Inject test hooks into user-level settings ────────────────────────────
     let originalSettings = null;
     try {
-      originalSettings = injectTestHooks(def.userSettings, agentKey, def.hookEvents, testDbPath);
+      originalSettings = injectTestHooks(def.userSettings, agentKey, def.hookEvents, testDbPath, def.detector);
       console.log(`  ${chalk.green('✓')} Test hooks injected into ${path.basename(def.userSettings)} (${def.hookEvents.length} events)`);
     } catch (err) {
       console.log(chalk.red(`  ✗ Failed to inject test hooks: ${err.message}`));

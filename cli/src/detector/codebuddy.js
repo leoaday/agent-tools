@@ -8,6 +8,37 @@ const displayName = 'CodeBuddy';
 const CONFIG_DIR = path.join(os.homedir(), '.codebuddy');
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 
+// CodeBuddy (≥ 2.x, fork of Claude Code) supports all 7 hook events.
+// Previous versions only injected PreToolUse/PostToolUse, which missed session
+// lifecycle and skill invocation data.
+const HOOK_EVENTS = ['SessionStart', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop'];
+
+function getVersion() {
+  try {
+    const output = execSync('codebuddy --version', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const match = output.match(/^(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+  } catch { return null; }
+}
+
+function versionGte(ver, minVer) {
+  const a = ver.split('.').map(Number);
+  const b = minVer.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) > (b[i] || 0)) return true;
+    if ((a[i] || 0) < (b[i] || 0)) return false;
+  }
+  return true;
+}
+
+// CodeBuddy is a Claude Code fork — same Zod schema validation applies.
+// Version threshold is conservative: default to nested (safe) when unknown.
+function needsNestedFormat() {
+  const ver = getVersion();
+  if (!ver) return true;
+  return versionGte(ver, '2.1.0');
+}
+
 function isInstalled() {
   try {
     const cmd = os.platform() === 'win32' ? 'where codebuddy' : 'which codebuddy';
@@ -32,28 +63,30 @@ function injectHooks(options = {}) {
     try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')); } catch { settings = {}; }
   }
   const hookScript = path.join(__dirname, '..', 'hooks', 'universal-hook.js');
-  const hookEvents = ['PreToolUse', 'PostToolUse'];
+  const hookEvents = HOOK_EVENTS;
+  const nested = needsNestedFormat();
+
   if (!settings.hooks) settings.hooks = {};
   for (const event of hookEvents) {
-    // Use new nested format: { matcher: "", hooks: [{type, command}] }
-    const hookEntry = {
-      matcher: '',
-      hooks: [{ type: 'command', command: `node "${hookScript}" --agent=codebuddy --event=${event}`, async: true }],
-    };
+    const command = `node "${hookScript}" --agent=codebuddy --event=${event}`;
+    const hookEntry = nested
+      ? { matcher: '', hooks: [{ type: 'command', command, async: true }] }
+      : { type: 'command', command, async: true };
     if (!settings.hooks[event]) {
       settings.hooks[event] = [hookEntry];
     } else if (!Array.isArray(settings.hooks[event])) {
       settings.hooks[event] = [settings.hooks[event], hookEntry];
     } else {
-      // Migrate old-format entries
-      settings.hooks[event] = settings.hooks[event].map((h) => {
-        if (h.command && !h.hooks) {
-          const inner = { type: 'command', command: h.command };
-          if (h.async !== undefined) inner.async = h.async;
-          return { matcher: h.matcher ?? '', hooks: [inner] };
-        }
-        return h;
-      });
+      if (nested) {
+        settings.hooks[event] = settings.hooks[event].map((h) => {
+          if (h.command && !h.hooks) {
+            const inner = { type: 'command', command: h.command };
+            if (h.async !== undefined) inner.async = h.async;
+            return { matcher: h.matcher ?? '', hooks: [inner] };
+          }
+          return h;
+        });
+      }
       const idx = settings.hooks[event].findIndex((h) => {
         if (h.command && h.command.includes('agent-tools')) return true;
         if (Array.isArray(h.hooks)) return h.hooks.some(i => i.command && i.command.includes('agent-tools'));
@@ -68,4 +101,4 @@ function injectHooks(options = {}) {
   return { success: true, configFile: SETTINGS_FILE };
 }
 
-module.exports = { name, displayName, isInstalled, configExists, hasAgentToolsHooks, injectHooks, CONFIG_DIR, SETTINGS_FILE };
+module.exports = { name, displayName, isInstalled, configExists, hasAgentToolsHooks, injectHooks, getVersion, needsNestedFormat, CONFIG_DIR, SETTINGS_FILE, HOOK_EVENTS };

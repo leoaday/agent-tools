@@ -8,6 +8,46 @@ const displayName = 'Claude Code';
 const CONFIG_DIR = path.join(os.homedir(), '.claude');
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 
+/**
+ * Get the installed Claude Code version string (e.g. "2.1.92").
+ * Returns null if not installed or version cannot be determined.
+ */
+function getVersion() {
+  try {
+    const output = execSync('claude --version', { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    // Output format: "2.1.92 (Claude Code)" or just "2.1.92"
+    const match = output.match(/^(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+  } catch { return null; }
+}
+
+/**
+ * Compare two semver strings. Returns true if `ver` >= `minVer`.
+ */
+function versionGte(ver, minVer) {
+  const a = ver.split('.').map(Number);
+  const b = minVer.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] || 0) > (b[i] || 0)) return true;
+    if ((a[i] || 0) < (b[i] || 0)) return false;
+  }
+  return true; // equal
+}
+
+/**
+ * Claude Code ≥ 2.1.0 requires hooks in nested format:
+ *   { matcher: "", hooks: [{ type: "command", command: "..." }] }
+ * Older versions use flat format:
+ *   { type: "command", command: "..." }
+ * Using old format on ≥ 2.1.0 silently fails (Zod schema drops entire settings).
+ * Using new format on < 2.1.0 is untested but unlikely to work.
+ */
+function needsNestedFormat() {
+  const ver = getVersion();
+  if (!ver) return true; // default to new format (safer — old format is catastrophic on new versions)
+  return versionGte(ver, '2.1.0');
+}
+
 function isInstalled() {
   try {
     const cmd = os.platform() === 'win32' ? 'where claude' : 'which claude';
@@ -51,19 +91,17 @@ function injectHooks(options = {}) {
 
   if (!settings.hooks) settings.hooks = {};
 
+  const nested = needsNestedFormat();
+
   for (const event of hookEvents) {
-    // Claude Code ≥ 2.1.x requires hooks in the new nested format:
-    //   { matcher: "", hooks: [{ type: "command", command: "..." }] }
-    // The old flat format ({ type, command }) silently fails schema validation,
-    // causing ALL user settings (including hooks) to be dropped.
-    const hookEntry = {
-      matcher: '',
-      hooks: [{
-        type: 'command',
-        command: `node "${hookScript}" --agent=claude-code --event=${event}`,
-        async: true,
-      }],
-    };
+    const command = `node "${hookScript}" --agent=claude-code --event=${event}`;
+
+    // Build hook entry in the format matching the installed version.
+    // ≥ 2.1.0: nested { matcher, hooks: [{ type, command }] }
+    // < 2.1.0: flat { type, command }
+    const hookEntry = nested
+      ? { matcher: '', hooks: [{ type: 'command', command, async: true }] }
+      : { type: 'command', command, async: true };
 
     if (!settings.hooks[event]) {
       settings.hooks[event] = [hookEntry];
@@ -71,16 +109,17 @@ function injectHooks(options = {}) {
       // Normalize to array
       settings.hooks[event] = [settings.hooks[event], hookEntry];
     } else {
-      // Migrate any old-format entries to new format
-      settings.hooks[event] = settings.hooks[event].map((h) => {
-        if (h.command && !h.hooks) {
-          // Old flat format → wrap in new nested format
-          const inner = { type: 'command', command: h.command };
-          if (h.async !== undefined) inner.async = h.async;
-          return { matcher: h.matcher ?? '', hooks: [inner] };
-        }
-        return h;
-      });
+      // If using nested format, migrate any old-format entries
+      if (nested) {
+        settings.hooks[event] = settings.hooks[event].map((h) => {
+          if (h.command && !h.hooks) {
+            const inner = { type: 'command', command: h.command };
+            if (h.async !== undefined) inner.async = h.async;
+            return { matcher: h.matcher ?? '', hooks: [inner] };
+          }
+          return h;
+        });
+      }
 
       // Check if agent-tools hook already exists (look inside nested hooks array)
       const idx = settings.hooks[event].findIndex((h) => {
@@ -115,6 +154,8 @@ module.exports = {
   configExists,
   hasAgentToolsHooks,
   injectHooks,
+  getVersion,
+  needsNestedFormat,
   CONFIG_DIR,
   SETTINGS_FILE,
 };
