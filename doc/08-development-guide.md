@@ -343,13 +343,60 @@ async function main() {
 main();  // 不 .catch(err => process.exit(1))
 ```
 
-### 4. 服务器上报接口无鉴权
+### 4. Skill（斜线命令）调用的统计方式
+
+#### 背景与结论
+
+用户通过 `/skill-name`（如 `/commit`）调用 Skill 时，存在两种执行路径：
+
+- **Inline 模式**：Claude Code 在用户提交前将 Skill 内容展开内联到对话，模型不会调用名为 `"Skill"` 的工具。此时 PostToolUse hook 中 **不会出现** `tool_name="Skill"`，事件流和普通对话一样（Bash/Edit/Read 等工具）。
+- **Fork 模式**：Claude Code 以子 Agent 身份运行 Skill，模型会调用 `tool_name="Skill"` 的工具。此时 PostToolUse hook 中会有 `tool_name="Skill"`，输入中含 `skill` 字段。
+
+经过对 `~/.claude/projects/**/*.jsonl` 的完整分析以及对 Claude Code 源码（`/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js`）的审查，确认：
+
+- **用户级别斜线命令（Inline 模式）**：通过 **UserPromptSubmit hook** 检测。Claude Code 在 hook 触发时传入原始 `prompt` 字段（未经 Skill 展开），其值为 `"/commit"` 等斜线开头字符串。
+- **模型发起的 Skill 调用（Fork 模式）**：通过 **PostToolUse hook** 检测，`tool_name="Skill"`，`tool_input.skill` 为 Skill 名称。
+
+#### 实现位置
+
+`cli/src/hooks/adapters/claude-code.js` 中的 `normalize()` 函数已实现两种检测：
+
+```javascript
+// Inline 路径：UserPromptSubmit 中 prompt 以 "/" 开头
+if (eventType === 'UserPromptSubmit' && typeof rawData.prompt === 'string') {
+  const trimmed = rawData.prompt.trim();
+  if (trimmed.startsWith('/')) {
+    const skillName = trimmed.split(/\s+/)[0].slice(1);
+    if (skillName) {
+      base.skill_name = skillName;
+      base.event_type = 'skill_use';
+    }
+  }
+}
+
+// Fork 路径：PostToolUse 中 tool_name 为 "Skill"
+if (eventType === 'PostToolUse' && base.tool_name === 'Skill') {
+  const skillInput = rawData.tool_input || rawData.input || {};
+  if (typeof skillInput.skill === 'string' && skillInput.skill) {
+    base.skill_name = skillInput.skill;
+  }
+  base.event_type = 'skill_use';
+}
+```
+
+#### 注意事项
+
+- Inline 模式的斜线命令检测依赖 `UserPromptSubmit` hook，因此必须确保该事件已注入（`claude-code.js` detector 中已包含）。
+- 若用户在 UserPromptSubmit 中输入了以 `/` 开头的普通文本（非 Skill 名称），也会被计为 `skill_use`。实际中这种情况极少见，可接受。
+- `skill_name` 取斜线后第一个 token（空格分隔），不含参数部分。
+
+### 5. 服务器上报接口无鉴权
 
 当前 `POST /api/v1/events/batch` 接口没有鉴权，适合在内网（团队局域网）使用。
 
 如果需要暴露到公网或添加鉴权，参考 `doc/06-server-detail.md` 的安全设计部分。计划在 Phase 5 添加可选的 API Key 认证。
 
-### 5. Knex `better-sqlite3` Client 名称
+### 6. Knex `better-sqlite3` Client 名称
 
 Knex 中 SQLite 的 client 名称是 `"better-sqlite3"`，**不是** `"sqlite3"`（后者是另一个性能较差的包）：
 
@@ -361,7 +408,7 @@ const knex = Knex({ client: 'better-sqlite3', connection: { filename: dbPath } }
 const knex = Knex({ client: 'sqlite3', ... });
 ```
 
-### 6. 上报时机的并发问题
+### 7. 上报时机的并发问题
 
 `uploader.js` 的自动上报（`startAutoUpload()`）和手动 `agent-tools sync` 可能同时运行。建议使用文件锁或 `uploading` 状态标志防止并发上报同一批事件：
 

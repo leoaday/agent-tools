@@ -19,6 +19,31 @@ function normalize(eventType, rawData) {
   if (rawData.lines_added !== undefined) base.lines_added = rawData.lines_added;
   if (rawData.lines_removed !== undefined) base.lines_removed = rawData.lines_removed;
   if (rawData.conversation_turn !== undefined) base.conversation_turn = rawData.conversation_turn;
+
+  // Detect user-typed slash commands (e.g. /commit, /review-pr) via UserPromptSubmit hook.
+  // Claude Code passes the raw prompt text before skill expansion, so `/skill-name` is visible here.
+  // The model-initiated Skill tool (tool_name="Skill") is a separate code path handled above.
+  if (eventType === 'UserPromptSubmit' && typeof rawData.prompt === 'string') {
+    const trimmed = rawData.prompt.trim();
+    if (trimmed.startsWith('/')) {
+      const skillName = trimmed.split(/\s+/)[0].slice(1);
+      if (skillName) {
+        base.skill_name = skillName;
+        base.event_type = 'skill_use';
+      }
+    }
+  }
+
+  // Detect model-initiated Skill tool invocations (PostToolUse with tool_name="Skill").
+  // The skill name is carried in the tool input under the "skill" key.
+  if (eventType === 'PostToolUse' && base.tool_name === 'Skill') {
+    const skillInput = rawData.tool_input || rawData.input || {};
+    if (typeof skillInput.skill === 'string' && skillInput.skill) {
+      base.skill_name = skillInput.skill;
+    }
+    base.event_type = 'skill_use';
+  }
+
   return base;
 }
 
