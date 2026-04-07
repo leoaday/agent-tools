@@ -18,17 +18,10 @@ jobs:
         node-version: [18.x, 20.x]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
-          cache-dependency-path: cli/pnpm-lock.yaml
-      - run: pnpm install --ignore-scripts
-        working-directory: cli
-      - run: pnpm rebuild better-sqlite3
+      - run: npm install
         working-directory: cli
       - name: Test modules load
         working-directory: cli
@@ -46,17 +39,10 @@ jobs:
         node-version: [18.x, 20.x]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
-          cache-dependency-path: server/pnpm-lock.yaml
-      - run: pnpm install --ignore-scripts
-        working-directory: server
-      - run: pnpm rebuild better-sqlite3
+      - run: npm install
         working-directory: server
       - name: Test modules load
         working-directory: server
