@@ -55,8 +55,8 @@ const AGENT_DEFS = {
     },
     scenarios: [
       {
-        name     : 'Basic tool use & session lifecycle',
-        prompt   : 'Write the text "hello agent-tools test" to a file named greet.txt',
+        name     : 'Basic tool use, file create & modify, session lifecycle',
+        prompt   : 'Write the text "hello agent-tools test" to a file named greet.txt, then use the Edit tool to replace "hello" with "hi" in greet.txt',
         useSkill : false,
         checks: [
           {
@@ -89,6 +89,7 @@ const AGENT_DEFS = {
                               e.event_type === 'assistant_stop' ||
                               e.event_type === 'session_end'),
           },
+          // ── File creation checks (Write tool) ──
           {
             label : 'files_created >= 1 on Write tool_use event',
             fn    : evts => evts.some(e =>
@@ -103,6 +104,36 @@ const AGENT_DEFS = {
                               e.tool_name === 'Write' &&
                               e.lines_added >= 1),
           },
+          // ── File modification checks (Edit tool) ──
+          {
+            label : 'files_modified >= 1 on Edit tool_use event',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'tool_use' &&
+                              e.tool_name === 'Edit' &&
+                              e.files_modified >= 1),
+          },
+          {
+            label : 'Edit tool_use event has files_modified and valid line counts',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'tool_use' &&
+                              e.tool_name === 'Edit' &&
+                              e.files_modified >= 1 &&
+                              (e.lines_added !== null || e.lines_removed !== null)),
+          },
+          // ── Disk file verification ──
+          {
+            label : 'greet.txt exists on disk after execution',
+            fn    : (_evts, ctx) => fs.existsSync(path.join(ctx.workDir, 'greet.txt')),
+          },
+          {
+            label : 'greet.txt contains edited content ("hi")',
+            fn    : (_evts, ctx) => {
+              const fp = path.join(ctx.workDir, 'greet.txt');
+              if (!fs.existsSync(fp)) return false;
+              return fs.readFileSync(fp, 'utf-8').includes('hi');
+            },
+          },
+          // ── Token & model checks ──
           {
             label : 'token_input > 0 on stop/session_end event',
             fn    : evts => evts.some(e =>
@@ -157,8 +188,8 @@ const AGENT_DEFS = {
     },
     scenarios: [
       {
-        name     : 'Basic tool use & session lifecycle',
-        prompt   : 'Write the text "hello agent-tools test" to a file named greet.txt',
+        name     : 'Basic tool use, file create & modify, session lifecycle',
+        prompt   : 'Write the text "hello agent-tools test" to a file named greet.txt, then use the Edit tool to replace "hello" with "hi" in greet.txt',
         useSkill : false,
         checks: [
           // CodeBuddy has a race condition in -p mode where SessionStart and
@@ -198,6 +229,7 @@ const AGENT_DEFS = {
                               e.event_type === 'assistant_stop' ||
                               e.event_type === 'session_end'),
           },
+          // ── File creation checks (Write tool) ──
           {
             label : 'files_created >= 1 on Write tool_use event',
             fn    : evts => evts.some(e =>
@@ -212,12 +244,41 @@ const AGENT_DEFS = {
                               e.tool_name === 'Write' &&
                               e.lines_added >= 1),
           },
+          // ── File modification checks (Edit tool) ──
+          {
+            label : 'files_modified >= 1 on Edit tool_use event',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'tool_use' &&
+                              e.tool_name === 'Edit' &&
+                              e.files_modified >= 1),
+          },
+          {
+            label : 'Edit tool_use event has files_modified and valid line counts',
+            fn    : evts => evts.some(e =>
+                              e.event_type === 'tool_use' &&
+                              e.tool_name === 'Edit' &&
+                              e.files_modified >= 1 &&
+                              (e.lines_added !== null || e.lines_removed !== null)),
+          },
+          // ── Disk file verification ──
+          {
+            label : 'greet.txt exists on disk after execution',
+            fn    : (_evts, ctx) => fs.existsSync(path.join(ctx.workDir, 'greet.txt')),
+          },
+          {
+            label : 'greet.txt contains edited content ("hi")',
+            fn    : (_evts, ctx) => {
+              const fp = path.join(ctx.workDir, 'greet.txt');
+              if (!fs.existsSync(fp)) return false;
+              return fs.readFileSync(fp, 'utf-8').includes('hi');
+            },
+          },
+          // ── Token checks ──
           {
             label    : 'token_input > 0 on stop/session_end event',
             fn       : evts => evts.some(e =>
                               (e.event_type === 'assistant_stop' || e.event_type === 'session_end') &&
                               e.token_input > 0),
-            // CodeBuddy short tasks may not fire Stop/SessionEnd reliably
             optional : true,
           },
           {
@@ -495,9 +556,10 @@ async function runTest(options) {
           console.log(chalk.dim(`      Check: ${def.userSettings}`));
         }
 
+        const checkCtx = { workDir };
         for (const check of scenario.checks) {
           let passed = false;
-          try { passed = check.fn(events); } catch { /* treat as fail */ }
+          try { passed = check.fn(events, checkCtx); } catch { /* treat as fail */ }
           if (!passed && check.optional) {
             // Optional checks show a warning instead of a failure
             console.log(`${chalk.yellow('    ⚠')} ${check.label} ${chalk.dim('(optional, skipped)')}`);

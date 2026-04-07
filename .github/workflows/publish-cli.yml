@@ -1,4 +1,4 @@
-name: Publish CLI (agent-tools)
+name: Release CLI (agent-tools)
 
 on:
   push:
@@ -33,12 +33,11 @@ jobs:
         working-directory: cli
         run: node bin/cli.js --help
 
-  publish:
+  release:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -47,7 +46,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-          registry-url: 'https://registry.npmjs.org'
           cache: 'pnpm'
           cache-dependency-path: cli/pnpm-lock.yaml
       - run: pnpm install --ignore-scripts --prod
@@ -64,8 +62,23 @@ jobs:
             pkg.version = '${{ steps.version.outputs.version }}';
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
-      - name: Publish to npm
+      - name: Pack tarball
         working-directory: cli
-        run: pnpm publish --no-git-checks --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm pack
+      - name: Rename tarball
+        working-directory: cli
+        run: mv *.tgz agent-tools-cli-${{ steps.version.outputs.version }}.tgz
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CLI v${{ steps.version.outputs.version }}
+          files: cli/agent-tools-cli-${{ steps.version.outputs.version }}.tgz
+          body: |
+            ## agent-tools CLI v${{ steps.version.outputs.version }}
+
+            ### 安装方式
+            ```bash
+            # 下载 tgz 后本地安装
+            npm install -g agent-tools-cli-${{ steps.version.outputs.version }}.tgz
+            ```
+          generate_release_notes: true
