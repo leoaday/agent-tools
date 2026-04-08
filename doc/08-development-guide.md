@@ -53,13 +53,25 @@
 - [x] GitHub Actions CI（`ci.yml`，push/PR 测试 + tag `v*` 触发 Release 打包）
 - [x] 服务器 dashboard 配置（`config.json` 中 `dashboard.rankingLimit`，通过 health API 传递给前端）
 
-### Phase 5（待实现）
+### Phase 5（已完成）
+
+- [x] **版本管理与自动更新**（设计文档：`doc/09-version-update-design.md`）
+  - [x] CLI `version` 命令：显示当前安装版本（来自 package.json，CI 打包时由 tag 写入）
+  - [x] CLI `check-update` 命令：查询服务器最新版本，自动下载安装
+  - [x] 服务端 `/api/v1/client/version` 接口：返回内嵌的客户端版本清单
+  - [x] 服务端 `/api/v1/client/download` 接口：动态注入服务器地址到 CLI tgz 后返回
+  - [x] CLI `default-config.json` 预置配置 + `postinstall.js` 自动应用服务器地址
+  - [x] Dashboard 右上角客户端下载链接
+  - [x] CI 打包流程：CLI → 内嵌到 Server → 生成版本清单 → Server 打包
+  - [x] 文件缓存：`~/.agent-tools-server/cache/cli-{version}-{urlHash}.tgz`
+
+### Phase 6（待实现）
 
 - [ ] **数据保留清理任务**：定时删除超出保留期的旧事件（目前无清理逻辑）
 - [ ] **服务端环境变量覆盖**：通过 `AT_PORT`、`AT_DB_*` 等环境变量配置，无需 config.json
 - [ ] **API Key 可选鉴权**：上报接口可选 `X-Agent-Tools-Key` 校验，适合公网部署
 
-### Phase 6（已完成）
+### Phase 7（已完成）
 
 - [x] **Hook 采集测试命令**（`cli/src/cli/test.js`）：`agent-tools test --agent <name>`，端到端验证 hooks 采集是否正常
 
@@ -73,7 +85,7 @@
 
 | 文件路径 | 职责 |
 |----------|------|
-| `cli/bin/cli.js` | CLI 入口，注册所有命令（Commander.js）：init / setup / sync / stats / status / agents |
+| `cli/bin/cli.js` | CLI 入口，注册所有命令（Commander.js）：init / setup / sync / stats / status / agents / version / check-update |
 | `cli/src/hooks/universal-hook.js` | Hook 脚本入口：从 stdin 读取 JSON → 选择适配器 → 调用 `local-store` 存储。**此文件必须永不 crash** |
 | `cli/src/hooks/adapters/claude-code.js` | Claude Code 适配器：normalize 原始 hook 数据，含斜线命令和 Skill 工具检测 |
 | `cli/src/hooks/adapters/codebuddy.js` | CodeBuddy 适配器：normalize 全部 hook 事件，含 Skill 调用检测（与 claude-code 适配器对齐） |
@@ -86,6 +98,9 @@
 | `cli/src/cli/setup.js` | `agent-tools setup` 实现（检测并注入各 Agent hooks） |
 | `cli/src/cli/sync.js` | `agent-tools sync` 实现（手动上报） |
 | `cli/src/cli/stats.js` | `agent-tools stats` 实现（本地 SQLite 查询，支持 --period / --date） |
+| `cli/src/cli/check-update.js` | `agent-tools check-update` 实现（版本查询 + 自动下载安装） |
+| `cli/default-config.json` | 预置配置文件（server.url 占位，由服务端下载接口动态注入） |
+| `cli/scripts/postinstall.js` | npm 安装后脚本：自动应用 default-config.json 中的服务器地址 |
 | `cli/src/utils/config.js` | 客户端配置管理（`~/.agent-tools/config.json`） |
 
 #### 服务端（`server/`）
@@ -93,18 +108,20 @@
 | 文件路径 | 职责 |
 |----------|------|
 | `server/bin/server.js` | 服务器入口：解析 `--port` / `--db-path`，运行 migrations，启动 Fastify |
-| `server/src/app.js` | Fastify 应用：注册 CORS、静态文件、health / events / stats 路由 |
+| `server/src/app.js` | Fastify 应用：注册 CORS、静态文件、health / events / stats / client 路由 |
 | `server/src/db.js` | `createDb(config)` — Knex 实例创建，自动建 SQLite 数据目录 |
 | `server/migrations/` | Knex migration 文件（001-004：events / sessions / daily_stats / tool_usage_detail） |
 | `server/src/routes/events.js` | `POST /api/v1/events/batch` 路由 |
 | `server/src/routes/stats.js` | 所有 `GET /api/v1/stats/*` 路由 |
 | `server/src/routes/health.js` | `GET /api/v1/health` 路由 |
 | `server/src/services/event-service.js` | 批量写入 + event_id 去重 |
-| `server/src/services/stats-service.js` | 统计查询核心：`computeDateRange`、`applyFilters`、`getSummary`、`getRanking`、`getRankingAll`、`getDrilldown`、`getTrend` |
+| `server/src/routes/client.js` | 客户端版本查询和下载接口：`/api/v1/client/version`、`/api/v1/client/download`（动态注入服务器地址） |
+| `server/src/client-version.json` | 客户端版本清单（CI 生成，开发时为占位值） |
+| `server/src/services/stats-service.js` | 统计查询核心：`computeDateRange`、`applyFilters`、`getSummary`、`getRanking`、`getRankingAll`、`getDrilldown`、`getTrend`、`getRankingTrend` |
 | `server/src/init-wizard.js` | 首次运行向导：交互式配置 SQLite / MySQL / PostgreSQL 和端口 |
 | `server/src/config.js` | 服务端配置管理（`~/.agent-tools-server/config.json`） |
 | `server/src/jobs/daily-aggregation.js` | 每日聚合 cron 任务（00:05 UTC 触发，写入 daily_stats / tool_usage_detail） |
-| `server/src/dashboard/index.html` | 单文件前端（ECharts CDN）：Overview / Ranking（全指标表格，列头排序） / Drilldown / Tools & Skills（分离展示） 四个 Tab |
+| `server/src/dashboard/index.html` | 单文件前端（ECharts CDN）：概览 / 排名（全指标表格 + 趋势折线图） / 钻取 / 工具与技能 四个 Tab，右上角客户端下载链接 |
 
 ---
 

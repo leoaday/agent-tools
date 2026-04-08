@@ -185,6 +185,10 @@ agent-tools-server
 | `GET` | `/api/v1/stats/tool-usage` | 工具使用详情（不含 Skill） |
 | `GET` | `/api/v1/stats/skill-usage` | Skill 使用统计（按 skill_name 聚合） |
 | `GET` | `/api/v1/stats/ranking-all` | 全指标排名（一次返回所有维度，前端排序） |
+| `GET` | `/api/v1/stats/ranking-trend` | 排名指标趋势（按日/小时聚合所有指标） |
+| `GET` | `/api/v1/stats/agents` | 已知 Agent 列表 |
+| `GET` | `/api/v1/client/version` | 客户端最新版本信息 |
+| `GET` | `/api/v1/client/download` | 下载客户端安装包（动态注入服务器地址） |
 
 ---
 
@@ -197,7 +201,7 @@ agent-tools-server
 ```json
 {
   "status": "ok",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "database": "better-sqlite3",
   "uptime": 3600,
   "dashboard": {
@@ -432,6 +436,38 @@ agent-tools-server
 ```
 
 默认返回前 100 个用户（由服务器配置 `dashboard.rankingLimit` 控制）。
+
+---
+
+### `GET /api/v1/client/version`
+
+返回内嵌的客户端版本信息。由 CI 打包时生成。
+
+**Response 200:**
+
+```json
+{
+  "version": "0.3.0",
+  "releasedAt": "2026-04-08T09:16:58Z"
+}
+```
+
+开发环境返回 `version: "0.0.0-dev"`。
+
+---
+
+### `GET /api/v1/client/download`
+
+下载客户端 CLI 安装包。服务器会动态将自身地址注入到 tgz 中的 `default-config.json`，使安装后的客户端自动配置上报地址。
+
+**特性：**
+- 支持所有反向代理头（`X-Forwarded-Proto/Host/Port/Prefix`、`X-Original-URL`、`Forwarded` RFC 7239）自动解析原始请求 URL
+- 按 base URL 和版本号做文件缓存（`~/.agent-tools-server/cache/cli-{version}-{hash}.tgz`）
+- 服务器升级后旧缓存自动失效
+
+**Response:**
+- `200` — `Content-Type: application/gzip`，`Content-Disposition: attachment; filename="agent-tools-cli.tgz"`
+- `404` — 开发环境，无 CLI tgz 可用
 
 ---
 
