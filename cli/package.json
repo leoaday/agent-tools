@@ -2,7 +2,15 @@
   "name": "agent-tools",
   "version": "0.1.0",
   "description": "Usage tracking tool for AI coding agents (Claude Code, CodeBuddy, etc.)",
-  "bin": { "agent-tools": "./bin/cli.js" },
+  "bin": {
+    "agent-tools": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "default-config.json"
+  ],
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "preuninstall": "node scripts/preuninstall.js"

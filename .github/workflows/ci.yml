@@ -77,7 +77,7 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
-      # ── CLI ──
+      # ── CLI (minimal) ──
       - run: npm install --ignore-scripts --omit=dev
         working-directory: cli
       - name: Set CLI version
@@ -110,7 +110,7 @@ jobs:
           }
           EOF
 
-      # ── Server ──
+      # ── Server (minimal) ──
       - run: npm install --ignore-scripts --omit=dev
         working-directory: server
       - name: Set Server version
@@ -138,10 +138,110 @@ jobs:
           body: |
             ## agent-tools v${{ steps.version.outputs.version }}
 
-            ### 安装方式
+            ### 安装方式（需联网下载依赖）
             ```bash
-            # 下载 tgz 后本地安装
             npm install -g agent-tools-cli-${{ steps.version.outputs.version }}.tgz
             npm install -g agent-tools-server-${{ steps.version.outputs.version }}.tgz
             ```
+
+            ### 离线安装（包含所有依赖，按平台选择）
+            ```bash
+            npm install -g agent-tools-cli-full-linux-${{ steps.version.outputs.version }}.tgz
+            npm install -g agent-tools-server-full-linux-${{ steps.version.outputs.version }}.tgz
+            ```
+            平台后缀：`linux` / `darwin` / `win32`
           generate_release_notes: true
+
+  release-full:
+    name: Release Full (${{ matrix.platform }})
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: darwin
+          - os: windows-latest
+            platform: win32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      # ── CLI full ──
+      - run: npm install --omit=dev
+        working-directory: cli
+      - name: Set CLI version
+        working-directory: cli
+        run: npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+      - name: Pack CLI full
+        working-directory: cli
+        run: |
+          node -e "const p=require('./package.json'); p.bundleDependencies=true; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+          npm pack
+        shell: bash
+      - name: Rename CLI full tarball
+        working-directory: cli
+        run: |
+          for f in *.tgz; do
+            target="agent-tools-cli-full-${{ matrix.platform }}-${{ steps.version.outputs.version }}.tgz"
+            [ "$f" = "$target" ] || mv "$f" "$target"
+          done
+        shell: bash
+
+      # ── Embed CLI tgz in Server + generate version manifest ──
+      - name: Embed CLI tgz in server
+        run: |
+          mkdir -p server/dist
+          cp cli/agent-tools-cli-full-${{ matrix.platform }}-${{ steps.version.outputs.version }}.tgz server/dist/agent-tools-cli.tgz
+        shell: bash
+
+      - name: Generate client-version.json
+        run: |
+          RELEASED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > server/src/client-version.json << EOF
+          {
+            "version": "${{ steps.version.outputs.version }}",
+            "releasedAt": "$RELEASED_AT"
+          }
+          EOF
+        shell: bash
+
+      # ── Server full ──
+      - run: npm install --omit=dev
+        working-directory: server
+      - name: Set Server version
+        working-directory: server
+        run: npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+      - name: Pack Server full
+        working-directory: server
+        run: |
+          node -e "const p=require('./package.json'); p.bundleDependencies=true; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');"
+          npm pack
+        shell: bash
+      - name: Rename Server full tarball
+        working-directory: server
+        run: |
+          for f in *.tgz; do
+            target="agent-tools-server-full-${{ matrix.platform }}-${{ steps.version.outputs.version }}.tgz"
+            [ "$f" = "$target" ] || mv "$f" "$target"
+          done
+        shell: bash
+
+      # ── Upload to existing Release ──
+      - name: Upload full packages to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          files: |
+            cli/agent-tools-cli-full-${{ matrix.platform }}-${{ steps.version.outputs.version }}.tgz
+            server/agent-tools-server-full-${{ matrix.platform }}-${{ steps.version.outputs.version }}.tgz
