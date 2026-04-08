@@ -25,7 +25,8 @@ agent-tools/
     ├── 05-client-detail.md
     ├── 06-server-detail.md
     ├── 07-implementation-plan.md
-    └── 08-development-guide.md
+    ├── 08-development-guide.md
+    └── 09-version-update-design.md
 ```
 
 ## 快速开始
@@ -221,6 +222,7 @@ npm install -g agent-tools-server
 | `doc/06-server-detail.md` | 服务端详细设计：API、数据处理、安全设计 |
 | `doc/07-implementation-plan.md` | 分阶段实施计划（Phase 1-5）和任务拆解 |
 | `doc/08-development-guide.md` | AI 辅助开发指南：代码库导航、扩展新 Agent 等 |
+| `doc/09-version-update-design.md` | 版本管理与自动更新设计：CLI 自更新、Server 分发、反向代理支持 |
 
 ## License
 
